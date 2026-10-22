@@ -83,7 +83,7 @@ namespace Typecho {
         $isPlugin = false;
 
         // detect if class is predefined
-        if (strpos($className, '\\') !== false) {
+        if ($isNamespace) {
             $isPlugin = strpos(ltrim($className, '\\'), PLUGIN_NAMESPACE . '\\') !== false;
 
             if ($isPlugin) {
@@ -168,7 +168,19 @@ namespace Typecho {
     class Common
     {
         /** 程序版本 */
-        public const VERSION = '1.2.0';
+        public const VERSION = '1.3.0';
+
+        /** 不能作为外部请求目标的 IPv4 地址段, 不依赖 PHP 版本的过滤规则 */
+        private const UNSAFE_IPV4_RANGES = [
+            '0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+            '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24', '192.88.99.0/24', '192.168.0.0/16',
+            '198.18.0.0/15', '198.51.100.0/24', '203.0.113.0/24', '224.0.0.0/4', '240.0.0.0/4'
+        ];
+
+        /** 全球单播 2000::/3 中不能作为外部请求目标的 IPv6 地址段 */
+        private const UNSAFE_IPV6_RANGES = [
+            '2001:2::/48', '2001:10::/28', '2001:20::/28', '2001:db8::/32', '3fff::/20'
+        ];
 
         /**
          * 将路径转化为链接
@@ -182,8 +194,10 @@ namespace Typecho {
          */
         public static function url(?string $path, ?string $prefix): string
         {
+            $path = $path ?? '';
             $path = (0 === strpos($path, './')) ? substr($path, 2) : $path;
-            return rtrim($prefix, '/') . '/' . str_replace('//', '/', ltrim($path, '/'));
+            return rtrim($prefix ?? '', '/') . '/'
+                . str_replace('//', '/', ltrim($path, '/'));
         }
 
         /**
@@ -228,12 +242,16 @@ namespace Typecho {
                 //覆盖原始错误信息
                 $message = 'Database Server Error';
 
-                if ($exception instanceof \Typecho\Db\Adapter\SQLException) {
+                if ($exception instanceof \Typecho\Db\Adapter\ConnectionException) {
                     $code = 503;
                     $message = 'Error establishing a database connection';
-                } elseif ($exception instanceof \Typecho\Db\Query\Exception) {
+                } elseif ($exception instanceof \Typecho\Db\Adapter\SQLException) {
                     $message = 'Database Query Error';
                 }
+            } elseif ($exception instanceof \Typecho\Widget\Exception) {
+                $message = $exception->getMessage();
+            } else {
+                $message = 'Server Error';
             }
 
             /** 设置http code */
@@ -376,8 +394,8 @@ EOF;
             }
 
             //非自闭合html标签列表
-            preg_match_all("/<([_0-9a-zA-Z-\:]+)\s*([^>]*)>/is", $string, $startTags);
-            preg_match_all("/<\/([_0-9a-zA-Z-\:]+)>/is", $string, $closeTags);
+            preg_match_all("/<([_0-9a-zA-Z-:]+)\s*([^>]*)>/is", $string, $startTags);
+            preg_match_all("/<\/([_0-9a-zA-Z-:]+)>/is", $string, $closeTags);
 
             if (!empty($startTags[1]) && is_array($startTags[1])) {
                 krsort($startTags[1]);
@@ -408,7 +426,7 @@ EOF;
                 }
             }
 
-            return preg_replace("/\<br\s*\/\>\s*\<\/p\>/is", '</p>', $string);
+            return preg_replace("/<br\s*\/>\s*<\/p>/is", '</p>', $string);
         }
 
         /**
@@ -430,7 +448,7 @@ EOF;
             $normalizeTags = '';
             $allowableAttributes = [];
 
-            if (!empty($allowableTags) && preg_match_all("/\<([_a-z0-9-]+)([^>]*)\>/is", $allowableTags, $tags)) {
+            if (!empty($allowableTags) && preg_match_all("/<([_a-z0-9-]+)([^>]*)>/is", $allowableTags, $tags)) {
                 $normalizeTags = '<' . implode('><', array_map('strtolower', $tags[1])) . '>';
                 $attributes = array_map('trim', $tags[2]);
                 foreach ($attributes as $key => $val) {
@@ -480,7 +498,7 @@ EOF;
          */
         public static function filterSearchQuery(?string $query): string
         {
-            return str_replace('-', ' ', self::slugName($query));
+            return isset($query) ? str_replace('-', ' ', self::slugName($query) ?? '') : '';
         }
 
         /**
@@ -489,14 +507,14 @@ EOF;
          * @access public
          *
          * @param string|null $str 需要生成缩略名的字符串
-         * @param string|null $default 默认的缩略名
+         * @param string $default 默认的缩略名
          * @param integer $maxLength 缩略名最大长度
          *
          * @return string
          */
-        public static function slugName(?string $str, ?string $default = null, int $maxLength = 128): ?string
+        public static function slugName(?string $str, string $default = '', int $maxLength = 128): string
         {
-            $str = trim($str);
+            $str = trim($str ?? '');
 
             if (!strlen($str)) {
                 return $default;
@@ -543,10 +561,14 @@ EOF;
 
             $params = array_map(function ($string) {
                 $string = str_replace(['%0d', '%0a'], '', strip_tags($string));
-                return preg_replace([
-                    "/\(\s*(\"|')/i",           //函数开头
-                    "/(\"|')\s*\)/i",           //函数结尾
+                $string = preg_replace([
+                    "/\(\s*([\"'])/i",           //函数开头
+                    "/([\"'])\s*\)/i",           //函数结尾
                 ], '', $string);
+                // Remove quotes and other dangerous characters that could be used for XSS attacks
+                // These characters can break out of HTML attributes
+                $string = str_replace(['"', "'", '<', '>'], '', $string);
+                return $string;
             }, $params);
 
             return self::buildUrl($params);
@@ -674,6 +696,18 @@ EOF;
         }
 
         /**
+         * 判断两个字符串是否为空并依次返回
+         *
+         * @param string|null $a
+         * @param string|null $b
+         * @return string|null
+         */
+        public static function strBy(?string $a, ?string $b = null): ?string
+        {
+            return isset($a) && $a !== '' ? $a : $b;
+        }
+
+        /**
          * 获取宽字符串长度函数
          *
          * @param string $str 需要获取长度的字符串
@@ -772,7 +806,7 @@ EOF;
             $result = '';
             $max = strlen($chars) - 1;
             for ($i = 0; $i < $length; $i++) {
-                $result .= $chars[rand(0, $max)];
+                $result .= $chars[random_int(0, $max)];
             }
             return $result;
         }
@@ -798,11 +832,16 @@ EOF;
          */
         public static function timeTokenValidate($token, $secret, int $timeout = 5): bool
         {
+            /** token 可能来自 JSON 等保留类型的输入, 只接受字符串并严格比较 */
+            if (!is_string($token) || '' === $token) {
+                return false;
+            }
+
             $now = time();
             $from = $now - $timeout;
 
             for ($i = $now; $i >= $from; $i--) {
-                if (sha1($secret . '&' . $i) == $token) {
+                if (hash_equals(sha1($secret . '&' . $i), $token)) {
                     return true;
                 }
             }
@@ -983,30 +1022,152 @@ EOF;
          */
         public static function checkSafeHost(string $host): bool
         {
-            if ('localhost' == $host) {
-                return false;
+            return null !== self::resolveSafeHost($host);
+        }
+
+        /**
+         * 解析主机名并返回一个可以安全连接的公网地址
+         * 主机名解析出的所有地址都必须是公网地址, 否则返回 null
+         * 调用者应该直接连接返回的地址, 而不是再次解析主机名
+         *
+         * @param string $host 主机名或 IP, IPv6 可以带方括号
+         * @return string|null
+         */
+        public static function resolveSafeHost(string $host): ?string
+        {
+            $host = strtolower($host);
+
+            /** 方括号只能用于 IPv6 地址 */
+            if ('[' == substr($host, 0, 1) && ']' == substr($host, -1)) {
+                $host = substr($host, 1, -1);
+
+                if (false === filter_var($host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV6)) {
+                    return null;
+                }
             }
 
-            $address = gethostbyname($host);
-            $inet = inet_pton($address);
+            if ('' === $host || 'localhost' == $host || '.localhost' == substr($host, -10)) {
+                return null;
+            }
 
-            if (false === $inet) {
-                // 有可能是ipv6的地址
-                $records = dns_get_record($host, DNS_AAAA);
+            if (false !== filter_var($host, FILTER_VALIDATE_IP)) {
+                $addresses = [$host];
+            } else {
+                /**
+                 * 只接受 ASCII 字母、数字、连字符与下划线组成的主机名
+                 * 末尾的点、百分号编码与非 ASCII 字符会让解析器与 curl 看到不同的名字, 一律拒绝
+                 */
+                if (!preg_match("/^[a-z0-9_-]+(\\.[a-z0-9_-]+)*$/", $host)) {
+                    return null;
+                }
 
-                if (empty($records)) {
+                /** 末段为数字的主机名会被当作非规范的 IPv4 地址, 如 2130706433、0x7f.1 */
+                $labels = explode('.', $host);
+                if (preg_match("/^(0x[0-9a-f]*|[0-9]+)$/", end($labels))) {
+                    return null;
+                }
+
+                $addresses = array_merge(
+                    gethostbynamel($host) ?: [],
+                    array_column(@dns_get_record($host, DNS_AAAA) ?: [], 'ipv6')
+                );
+            }
+
+            if (empty($addresses)) {
+                return null;
+            }
+
+            foreach ($addresses as $address) {
+                $inet = @inet_pton($address);
+
+                if (false === $inet || !self::isPublicAddress($inet)) {
+                    return null;
+                }
+            }
+
+            return $addresses[0];
+        }
+
+        /**
+         * 判断一个二进制形式的 IP 地址是否是公网地址
+         * 内嵌 IPv4 的 IPv6 地址按其中的 IPv4 地址检查
+         *
+         * @param string $inet inet_pton() 的结果
+         * @return bool
+         */
+        private static function isPublicAddress(string $inet): bool
+        {
+            if (16 == strlen($inet)) {
+                $embedded = null;
+
+                if (
+                    self::inRange($inet, '::ffff:0:0/96') || self::inRange($inet, '::ffff:0:0:0/96')
+                    || self::inRange($inet, '::/96') || self::inRange($inet, '64:ff9b::/96')
+                ) {
+                    /** IPv4 映射、转换、兼容地址与 NAT64 */
+                    $embedded = [substr($inet, 12)];
+                } elseif (self::inRange($inet, '2002::/16')) {
+                    /** 6to4 */
+                    $embedded = [substr($inet, 2, 4)];
+                } elseif (self::inRange($inet, '2001::/32')) {
+                    /** Teredo, 服务器地址与取反后的客户端地址 */
+                    $embedded = [substr($inet, 4, 4), ~substr($inet, 12)];
+                }
+
+                if (isset($embedded)) {
+                    foreach ($embedded as $ipv4) {
+                        if (!self::isPublicAddress($ipv4)) {
+                            return false;
+                        }
+                    }
+
+                    return true;
+                }
+
+                /** 只允许全球单播地址 2000::/3 */
+                if (!self::inRange($inet, '2000::/3')) {
                     return false;
                 }
 
-                $address = $records[0]['ipv6'];
-                $inet = inet_pton($address);
+                $ranges = self::UNSAFE_IPV6_RANGES;
+            } elseif (4 == strlen($inet)) {
+                $ranges = self::UNSAFE_IPV4_RANGES;
+            } else {
+                return false;
             }
 
-            return filter_var(
-                $address,
+            foreach ($ranges as $range) {
+                if (self::inRange($inet, $range)) {
+                    return false;
+                }
+            }
+
+            /** 再叠加 PHP 自带的过滤规则兜底, 只会多拒绝, PHP 将来新增的保留段也能自动跟进 */
+            return false !== filter_var(
+                inet_ntop($inet),
                 FILTER_VALIDATE_IP,
                 FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE
-            ) !== false;
+            );
+        }
+
+        /**
+         * 判断二进制形式的地址是否落在 CIDR 地址段内
+         *
+         * @param string $inet inet_pton() 的结果
+         * @param string $range 地址段, 如 10.0.0.0/8、2002::/16
+         * @return bool
+         */
+        private static function inRange(string $inet, string $range): bool
+        {
+            [$subnet, $bits] = explode('/', $range);
+            $subnet = inet_pton($subnet);
+            $bits = (int) $bits;
+            $bytes = intdiv($bits, 8);
+            $mask = (0xff << (8 - $bits % 8)) & 0xff;
+
+            return strlen($inet) == strlen($subnet)
+                && substr($inet, 0, $bytes) === substr($subnet, 0, $bytes)
+                && ($bits % 8 == 0 || (ord($inet[$bytes]) & $mask) == (ord($subnet[$bytes]) & $mask));
         }
 
         /**
@@ -1032,16 +1193,6 @@ EOF;
             //改为并列判断
             if (function_exists('mime_content_type')) {
                 return mime_content_type($fileName);
-            }
-
-            if (function_exists('finfo_open')) {
-                $fInfo = @finfo_open(FILEINFO_MIME_TYPE);
-
-                if (false !== $fInfo) {
-                    $mimeType = finfo_file($fInfo, $fileName);
-                    finfo_close($fInfo);
-                    return $mimeType;
-                }
             }
 
             $mimeTypes = [
@@ -1357,7 +1508,8 @@ EOF;
                 'ice'      => 'x-conference/x-cooltalk',
                 'vrm'      => 'x-world/x-vrml',
                 'rar'      => 'application/x-rar-compressed',
-                'cab'      => 'application/vnd.ms-cab-compressed'
+                'cab'      => 'application/vnd.ms-cab-compressed',
+                'webp'     => 'image/webp'
             ];
 
             $part = explode('.', $fileName);
@@ -1473,6 +1625,22 @@ EOF;
             }
 
             return $result;
+        }
+
+        /**
+         * IDN转UTF8
+         *
+         * @param string $url
+         * @return string
+         */
+        public static function idnToUtf8(string $url): string
+        {
+            if (function_exists('idn_to_utf8') && !empty($url)) {
+                $host = parse_url($url, PHP_URL_HOST);
+                $url = str_replace($host, idn_to_utf8($host), $url);
+            }
+
+            return $url;
         }
     }
 }

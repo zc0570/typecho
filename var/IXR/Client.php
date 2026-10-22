@@ -20,47 +20,57 @@ class Client
      *
      * @var string
      */
-    private $url;
+    private string $url;
 
     /**
      * 消息体
      *
      * @var Message
      */
-    private $message;
+    private Message $message;
 
     /**
      * 调试开关
      *
      * @var boolean
      */
-    private $debug = false;
+    private bool $debug = false;
 
     /**
      * 请求前缀
      *
      * @var string|null
      */
-    private $prefix;
+    private ?string $prefix;
 
     /**
      * @var Error
      */
-    private $error;
+    private Error $error;
+
+    /**
+     * 是否只允许连接公网地址
+     *
+     * @var bool
+     */
+    private bool $safeMode = false;
 
     /**
      * 客户端构造函数
      *
      * @param string $url 服务端地址
      * @param string|null $prefix
+     * @param bool $safeMode 服务端地址不可信时只允许连接公网地址
      * @return void
      */
     public function __construct(
         string $url,
-        ?string $prefix = null
+        ?string $prefix = null,
+        bool $safeMode = false
     ) {
         $this->url = $url;
         $this->prefix = $prefix;
+        $this->safeMode = $safeMode;
     }
 
     /**
@@ -94,6 +104,7 @@ class Client
             $client->setHeader('Content-Type', 'text/xml')
                 ->setHeader('User-Agent', self::DEFAULT_USERAGENT)
                 ->setData($xml)
+                ->setSafeMode($this->safeMode)
                 ->send($this->url);
         } catch (HttpClient\Exception $e) {
             $this->error = new Error(-32700, $e->getMessage());
@@ -135,7 +146,7 @@ class Client
      */
     public function __get(string $prefix): Client
     {
-        return new self($this->url, $this->prefix . $prefix . '.');
+        return new self($this->url, $this->prefix . $prefix . '.', $this->safeMode);
     }
 
     /**

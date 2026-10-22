@@ -14,12 +14,12 @@ class Pingback
     /**
      * @var string
      */
-    private $html;
+    private string $html;
 
     /**
      * @var string
      */
-    private $target;
+    private string $target;
 
     /**
      * @param string $url
@@ -36,7 +36,9 @@ class Pingback
         }
 
         try {
+            /** 源地址不可信, 只连接校验过的公网地址, 避免两次解析之间的 DNS rebinding */
             $client->setTimeout(5)
+                ->setSafeMode()
                 ->send($url);
         } catch (HttpException $e) {
             throw new Exception('Pingback http error', 50);
@@ -73,7 +75,7 @@ class Pingback
      */
     public function getTitle(): string
     {
-        if (preg_match("/\<title\>([^<]*?)\<\/title\\>/is", $this->html, $matchTitle)) {
+        if (preg_match("/<title>([^<]*?)<\/title>/is", $this->html, $matchTitle)) {
             return Common::subStr(Common::removeXSS(trim(strip_tags($matchTitle[1]))), 0, 150, '...');
         }
 

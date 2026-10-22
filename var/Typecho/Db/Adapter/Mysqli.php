@@ -5,6 +5,7 @@ namespace Typecho\Db\Adapter;
 use Typecho\Config;
 use Typecho\Db;
 use Typecho\Db\Adapter;
+use mysqli_sql_exception;
 
 if (!defined('__TYPECHO_ROOT_DIR__')) {
     exit;
@@ -25,7 +26,7 @@ class Mysqli implements Adapter
      * @access private
      * @var \mysqli
      */
-    private $dbLink;
+    private \mysqli $dbLink;
 
     /**
      * 判断适配器是否可用
@@ -47,24 +48,49 @@ class Mysqli implements Adapter
      */
     public function connect(Config $config): \mysqli
     {
+        $mysqli = mysqli_init();
+        if ($mysqli) {
+            try {
+                if (!empty($config->sslCa)) {
+                    $mysqli->ssl_set(null, null, $config->sslCa, null, null);
 
-        if (
-            $this->dbLink = @mysqli_connect(
-                $config->host,
-                $config->user,
-                $config->password,
-                $config->database,
-                (empty($config->port) ? null : $config->port)
-            )
-        ) {
-            if ($config->charset) {
-                $this->dbLink->query("SET NAMES '{$config->charset}'");
+                    if (isset($config->sslVerify)) {
+                        $mysqli->options(MYSQLI_OPT_SSL_VERIFY_SERVER_CERT, $config->sslVerify);
+                    }
+                }
+
+                $host = $config->host;
+                $port = empty($config->port) ? null : $config->port;
+                $socket = null;
+                if (strpos($host, '/') !== false) {
+                    $socket = $host;
+                    $host = 'localhost';
+                    $port = null;
+                }
+
+                $mysqli->real_connect(
+                    $host,
+                    $config->user,
+                    $config->password,
+                    $config->database,
+                    $port,
+                    $socket
+                );
+
+                $this->dbLink = $mysqli;
+
+                if ($config->charset) {
+                    $this->dbLink->query("SET NAMES '{$config->charset}'");
+                }
+            } catch (mysqli_sql_exception $e) {
+                throw new ConnectionException($e->getMessage(), $e->getCode());
             }
+
             return $this->dbLink;
         }
 
         /** 数据库异常 */
-        throw new ConnectionException("Couldn't connect to database.");
+        throw new ConnectionException("Couldn't connect to database.", mysqli_connect_errno());
     }
 
     /**
@@ -95,8 +121,13 @@ class Mysqli implements Adapter
         ?string $action = null,
         ?string $table = null
     ) {
-        if ($resource = @$this->dbLink->query($query)) {
-            return $resource;
+        try {
+            if ($resource = $this->dbLink->query($query)) {
+                return $resource;
+            }
+        } catch (mysqli_sql_exception $e) {
+            /** 数据库异常 */
+            throw new SQLException($e->getMessage(), $e->getCode());
         }
 
         /** 数据库异常 */
@@ -141,9 +172,9 @@ class Mysqli implements Adapter
      * 将数据查询的其中一行作为对象取出,其中字段名对应对象属性
      *
      * @param \mysqli_result $resource 查询的资源数据
-     * @return object|null
+     * @return \stdClass|null
      */
-    public function fetchObject($resource): ?object
+    public function fetchObject($resource): ?\stdClass
     {
         return $resource->fetch_object();
     }
